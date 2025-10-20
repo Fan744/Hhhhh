@@ -9,10 +9,10 @@ from telegram.ext import (
 )
 
 # ✅ ADD YOUR BOT TOKEN HERE
-BOT_TOKEN = "7576547930:AAEPWxQHD3yNJwcZ0zCpK5OZFHiawxQrGIQ"
+BOT_TOKEN = "8369100760:AAEEkuwbZz0eOghLboKeP1qN2l9tJd0OdwE"
 
 # ✅ TELEGRAM CHANNEL USERNAME (without @)
-CHANNEL_USERNAME = "team_black_hat_offical"
+CHANNEL_USERNAME = "ushwahaboomber"
 
 # ✅ Enable logs
 logging.basicConfig(level=logging.INFO)
