@@ -1,156 +1,202 @@
 import logging
 import random
+import asyncio
+import re
 from collections import deque
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-import asyncio
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import pytesseract
+from PIL import Image
+import io
 
 # लॉगिंग
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ग्लोबल डेटा
-last_results = deque(maxlen=20)  # पिछले 20 रिजल्ट्स
-user_chats = set()  # सभी चैट IDs जो बॉट से बात कर रहे हैं
-is_running = False  # ऑटो प्रेडिक्शन स्टेटस
+last_results = deque(maxlen=50)  # पिछले 50 रिजल्ट्स (नंबर)
+user_chats = set()              # सक्रिय यूज़र्स
+is_running = False              # 24/7 स्टेटस
 
-# रैंडम रिजल्ट जेनरेटर (सिमुलेशन)
-def generate_random_result():
-    weights = [45, 45, 10]  # Red: 45%, Green: 45%, Violet: 10%
-    return random.choices(['Red', 'Green', 'Violet'], weights=weights, k=1)[0]
+# नंबर पैटर्न (0-9)
+NUMBER_PATTERN = re.compile(r'\b([0-9])\b')
 
-# प्रेडिक्शन लॉजिक
-def get_prediction():
-    if len(last_results) < 3:
-        return random.choice(['Red', 'Green'])
-    
-    recent = list(last_results)[-3:]
-    red_count = recent.count('Red')
-    green_count = recent.count('Green')
-    
-    if red_count >= 2:
-        return 'Green'
-    elif green_count >= 2:
-        return 'Red'
+# OCR से इमेज से टेक्स्ट निकालो
+def ocr_image(image_bytes):
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        text = pytesseract.image_to_string(image, lang='eng')
+        return text
+    except Exception as e:
+        logger.error(f"OCR Error: {e}")
+        return ""
+
+# टेक्स्ट से नंबर निकालो
+def extract_numbers(text):
+    numbers = NUMBER_PATTERN.findall(text)
+    return [int(n) for n in numbers if n.isdigit()]
+
+# एनालिसिस और प्रेडिक्शन
+def analyze_and_predict(numbers):
+    if len(numbers) < 3:
+        return "कम डेटा", None, None, 50
+
+    recent = numbers[-5:]
+    small_count = sum(1 for x in recent if x <= 4)
+    big_count = len(recent) - small_count
+
+    # पैटर्न चेक
+    last_three = recent[-3:]
+    if len(set(last_three)) == 1:  # 3 same
+        pred_num = random.choice([0,1,2,3,4,5,6,7,8,9])
+        confidence = 75
+    elif small_count >= 4:
+        pred_num = random.choice([5,6,7,8,9])
+        confidence = 82
+    elif big_count >= 4:
+        pred_num = random.choice([0,1,2,3,4])
+        confidence = 82
     else:
-        return random.choice(['Red', 'Green', 'Violet'])
+        pred_num = random.randint(0, 9)
+        confidence = 68
 
-# ऑटो प्रेडिक्शन टास्क (हर 60 सेकंड)
+    pred_type = "Small" if pred_num <= 4 else "Big"
+    color = "Violet" if pred_num in [0, 5] else ("Red" if pred_num >= 5 else "Green")
+
+    return color, pred_num, pred_type, confidence
+
+# फोटो हैंडलर (स्क्रीनशॉट)
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_chats.add(chat_id)
+
+    photo_file = await update.message.photo[-1].get_file()
+    photo_bytes = await photo_file.download_as_bytearray()
+
+    await update.message.reply_text("स्क्रीनशॉट मिला! एनालिसिस कर रहा हूँ...")
+
+    text = ocr_image(photo_bytes)
+    if not text.strip():
+        await update.message.reply_text("कोई टेक्स्ट नहीं मिला। साफ़ स्क्रीनशॉट भेजें।")
+        return
+
+    numbers = extract_numbers(text)
+    if len(numbers) < 5:
+        await update.message.reply_text(f"केवल {len(numbers)} नंबर मिले। कम से कम 5 चाहिए।")
+        return
+
+    # ग्लोबल रिजल्ट्स अपडेट
+    last_results.extend(numbers[-20:])
+
+    color, pred_num, pred_type, confidence = analyze_and_predict(list(last_results))
+
+    message = (
+        "पूरा एनालिसिस\n\n"
+        f"मिले नंबर: `{', '.join(map(str, numbers[-10:]))}`\n"
+        f"पिछले 5: `{', '.join(map(str, numbers[-5:]))}`\n\n"
+        f"अगला नंबर: **{pred_num}**\n"
+        f"टाइप: **{pred_type}** (0-4=Small, 5-9=Big)\n"
+        f"कलर: **{color}**\n"
+        f"आत्मविश्वास: {confidence}%\n\n"
+        "अभी बेट लगाओ! (सिमुलेशन है)"
+    )
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+# 24/7 ऑटो प्रेडिक्शन
 async def auto_prediction_task(application: Application):
     global is_running
     while is_running:
         try:
-            # 1. नया रिजल्ट जेनरेट करो (सिमुलेशन)
-            new_result = generate_random_result()
+            # नया रैंडम रिजल्ट
+            new_result = random.choices([0,1,2,3,4,5,6,7,8,9], weights=[10]*10, k=1)[0]
             last_results.append(new_result)
 
-            # 2. प्रेडिक्शन बनाओ
-            prediction = get_prediction()
-            confidence = random.randint(68, 92)
+            color, pred_num, pred_type, confidence = analyze_and_predict(list(last_results))
 
-            # 3. मैसेज बनाओ
             message = (
-                "ऑटो प्रेडिक्शन (24/7)\n\n"
-                f"अभी का रिजल्ट: `{new_result}`\n"
-                f"अगला प्रेडिक्शन: **{prediction}**\n"
+                "24/7 ऑटो प्रेडिक्शन\n\n"
+                f"अभी का रिजल्ट: `{new_result}` ({'Violet' if new_result in [0,5] else ('Red' if new_result >=5 else 'Green')})\n"
+                f"अगला अनुमान: **{pred_num}** ({pred_type})\n"
+                f"कलर: **{color}**\n"
                 f"आत्मविश्वास: {confidence}%\n\n"
-                f"पिछले 10 रिजल्ट्स:\n"
-                f"`{' | '.join(list(last_results)[-10:])}`\n\n"
-                "यह सिर्फ सिमुलेशन है। रियल गेम में कोई गारंटी नहीं!"
+                f"पिछले 10: `{' | '.join(map(str, list(last_results)[-10:]))}`\n\n"
+                "सिमुलेशन है — रियल गेम में कोई गारंटी नहीं!"
             )
 
-            # 4. सभी यूजर्स को भेजो
             for chat_id in list(user_chats):
                 try:
-                    await application.bot.send_message(
-                        chat_id=chat_id,
-                        text=message,
-                        parse_mode='Markdown',
-                        disable_web_page_preview=True
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send to {chat_id}: {e}")
+                    await application.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+                except:
                     user_chats.discard(chat_id)
 
-            # 60 सेकंड वेट
             await asyncio.sleep(60)
-
         except Exception as e:
-            logger.error(f"Auto prediction error: {e}")
+            logger.error(f"Auto error: {e}")
             await asyncio.sleep(10)
 
-# /start
+# कमांड्स
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_chats.add(chat_id)
-
+    user_chats.add(update.effective_chat.id)
     await update.message.reply_text(
-        "*24/7 कलर प्रेडिक्शन बॉट चालू!*\n\n"
-        "हर मिनट में आपको ऑटो प्रेडिक्शन मिलेगा!\n\n"
-        "/predict - मैन्युअल प्रेडिक्शन\n"
-        "/stop - ऑटो प्रेडिक्शन बंद करें\n"
-        "/stats - स्टेटस चेक करें\n\n"
-        "*जुआ से दूर रहें। यह सिर्फ एंटरटेनमेंट है।*",
+        "*कलर + नंबर प्रेडिक्टर बॉट चालू!*\n\n"
+        "फोटो भेजो → मैं पूरा एनालिसिस करूँगा\n"
+        "हर मिनट ऑटो प्रेडिक्शन भी आएगा!\n\n"
+        "/predict - मैन्युअल\n"
+        "/stop - ऑटो बंद\n"
+        "/stats - स्टेटस",
         parse_mode='Markdown'
     )
 
-# /predict (मैन्युअल)
 async def predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_chats.add(chat_id)
-
-    prediction = get_prediction()
-    confidence = random.randint(65, 90)
-
-    message = (
-        f"**मैन्युअल प्रेडिक्शन**: **{prediction}**\n"
-        f"**आत्मविश्वास**: {confidence}%\n"
-        f"**पिछले 5**: `{' | '.join(list(last_results)[-5:])}`"
+    user_chats.add(update.effective_chat.id)
+    if len(last_results) < 3:
+        await update.message.reply_text("पहले स्क्रीनशॉट भेजो!")
+        return
+    color, pred_num, pred_type, confidence = analyze_and_predict(list(last_results))
+    await update.message.reply_text(
+        f"मैन्युअल प्रेडिक्शन\n\n"
+        f"अगला: **{pred_num}** ({pred_type})\n"
+        f"कलर: **{color}**\n"
+        f"आत्मविश्वास: {confidence}%",
+        parse_mode='Markdown'
     )
-    await update.message.reply_text(message, parse_mode='Markdown')
 
-# /stop
 async def stop_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_chats.discard(chat_id)
-    await update.message.reply_text("ऑटो प्रेडिक्शन आपके लिए बंद कर दिया गया।")
+    user_chats.discard(update.effective_chat.id)
+    await update.message.reply_text("ऑटो प्रेडिक्शन आपके लिए बंद।")
 
-# /stats
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_users = len(user_chats)
-    total_results = len(last_results)
     await update.message.reply_text(
         f"*बॉट स्टेटस*\n\n"
-        f"सक्रिय यूजर्स: {total_users}\n"
-        f"कुल रिजल्ट्स: {total_results}\n"
-        f"24/7 प्रेडिक्शन: {'चालू' if is_running else 'बंद'}",
+        f"सक्रिय यूज़र्स: {len(user_chats)}\n"
+        f"कुल रिजल्ट्स: {len(last_results)}\n"
+        f"24/7: {'चालू' if is_running else 'बंद'}",
         parse_mode='Markdown'
     )
 
 # मेन फंक्शन
 def main():
     global is_running
-
-    # आपका टोकन यहाँ डाला गया है
     TOKEN = '8313201920:AAH1PfXk6b6sgBPNCT_H5AEMAhZETItO5gg'
 
     application = Application.builder().token(TOKEN).build()
 
-    # कमांड्स
+    # हैंडलर्स
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("predict", predict))
     application.add_handler(CommandHandler("stop", stop_auto))
     application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # बॉट स्टार्ट होने पर ऑटो टास्क शुरू करो
-    async def start_auto_task():
+    # 24/7 ऑटो शुरू करो
+    async def start_auto():
         global is_running
         is_running = True
         await auto_prediction_task(application)
 
-    application.job_queue.run_once(lambda _: application.create_task(start_auto_task()), 2)
+    application.job_queue.run_once(lambda _: application.create_task(start_auto()), 2)
 
-    print("24/7 कलर प्रेडिक्शन बॉट स्टार्ट हो रहा है...")
+    print("24/7 + OCR प्रेडिक्टर बॉट चालू हो रहा है...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
