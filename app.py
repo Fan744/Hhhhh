@@ -177,7 +177,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # मेन फंक्शन
 def main():
     global is_running
-    TOKEN = '8313201920:AAH1PfXk6b6sgBPNCT_H5AEMAhZETItO5gg'
+    TOKEN = '8369100760:AAEEkuwbZz0eOghLboKeP1qN2l9tJd0OdwE'
 
     application = Application.builder().token(TOKEN).build()
 
